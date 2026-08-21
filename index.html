@@ -51,13 +51,16 @@ const permits = [
 ];
 
 const lots = [
-  { id: "carmack", name: "Carmack Lot", lat: null, lng: null }, // TODO: geocode (treat as one point for v1)
-  { id: "buckeye", name: "Buckeye Lot", lat: null, lng: null }, // TODO: geocode 2701 Fred Taylor Dr, Columbus, OH 43210
+  { id: "carmack", name: "Carmack Lot", lat: 40.00102, lng: -83.03715 }, // Carmack 2 bus stop, used as the lot point
+  { id: "buckeye", name: "Buckeye Lot", lat: 40.01600, lng: -83.03066 }, // Buckeye Lot bus stop, used as the lot point
 ];
 
 const stops = [
-  // TODO: transcribe all 46 CABS stops from ttm.osu.edu/cabs (or find a GTFS feed).
-  // Shape: { id, name, lat, lng, routes: ["CC", "MC", ...] }
+  // Just enough stops to route Buckeye/Carmack <-> Campbell/Jennings Hall.
+  // TODO: transcribe the rest of the ~46 CABS stops from ttm.osu.edu/cabs-bus-stop-list as more classes are added.
+  { id: "buckeye-lot-sb", name: "Buckeye Lot (southbound)", lat: 40.01600, lng: -83.03066, routes: ["BE", "CLS"] },
+  { id: "carmack-2-sb", name: "Carmack 2 (southbound)", lat: 40.00102, lng: -83.03715, routes: ["MC"] },
+  { id: "arps-hall-nb", name: "Arps Hall (northbound)", lat: 40.0019522, lng: -83.0096785, routes: ["BE", "CC", "CLS", "ER", "NWC"] },
 ];
 
 const buildings = [
@@ -80,6 +83,10 @@ function getOrsApiKey() {
   return localStorage.getItem("orsApiKey") || "";
 }
 
+// Set by walkTime() whenever it had to fall back to a straight-line estimate
+// (no ORS key yet), so the UI can flag results as approximate.
+let usedWalkEstimateFallback = false;
+
 // Straight-line prefilter so we don't hit the ORS API for obviously-too-far stops.
 function haversineKm(a, b) {
   const R = 6371;
@@ -96,10 +103,15 @@ function estimateWalkMinutes(distanceKm) {
 }
 
 // Real walking time in minutes between two {lat, lng} points, via OpenRouteService.
+// Falls back to a straight-line estimate when no API key is set yet, so routing
+// still produces output — swap in the key (Settings) for accurate times.
 // LATER: swap internals for self-hosted OSRM if ORS's free tier becomes limiting.
 async function walkTime(a, b) {
   const apiKey = getOrsApiKey();
-  if (!apiKey) throw new Error("No OpenRouteService API key set (see Settings).");
+  if (!apiKey) {
+    usedWalkEstimateFallback = true;
+    return estimateWalkMinutes(haversineKm(a, b));
+  }
 
   const url = new URL("https://api.openrouteservice.org/v2/directions/foot-walking");
   url.searchParams.set("api_key", apiKey);
@@ -233,12 +245,17 @@ async function runRoute(entry, fromCar) {
   }
 
   try {
+    usedWalkEstimateFallback = false;
     const result = await bestRoute(fromCar, building, permit);
     if (!result) {
       resultBox.textContent = "No route found within the walk-time cap.";
       return;
     }
+    const note = usedWalkEstimateFallback
+      ? "(no ORS API key set — walk times are straight-line estimates, not real walking directions)\n\n"
+      : "";
     resultBox.textContent =
+      note +
       `${fromCar ? "Car → " + entry.building : entry.building + " → Car"}\n` +
       `Park at: ${result.lot.name}\n` +
       `Walk to stop: ${result.stop.name} (${result.walk1.toFixed(1)} min)\n` +
