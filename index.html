@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>CABS Parking Router</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 <style>
   :root { color-scheme: light dark; }
   body { font-family: system-ui, sans-serif; max-width: 640px; margin: 0 auto; padding: 1rem; line-height: 1.4; }
@@ -15,6 +17,7 @@
   .empty { opacity: .6; font-style: italic; }
   label { display: block; font-size: .85rem; margin-top: .5rem; }
   input[type=text] { width: 100%; box-sizing: border-box; padding: .4rem; margin-top: .2rem; }
+  #map { height: 320px; border-radius: 6px; margin-top: .5rem; }
 </style>
 </head>
 <body>
@@ -37,6 +40,7 @@
 <section id="output">
   <h2>Result</h2>
   <div id="resultBox" class="result empty">Pick a class above to route to/from it.</div>
+  <div id="map"></div>
 </section>
 
 <script>
@@ -102,15 +106,20 @@ function estimateWalkMinutes(distanceKm) {
   return (distanceKm / walkKmh) * 60;
 }
 
-// Real walking time in minutes between two {lat, lng} points, via OpenRouteService.
+// Walking leg between two {lat, lng} points, via OpenRouteService: duration in
+// minutes plus the path geometry (as [lat, lng] points, for drawing on the map).
 // Falls back to a straight-line estimate when no API key is set yet, so routing
-// still produces output — swap in the key (Settings) for accurate times.
+// still produces output — swap in the key (Settings) for accurate times/paths.
 // LATER: swap internals for self-hosted OSRM if ORS's free tier becomes limiting.
-async function walkTime(a, b) {
+async function walkRoute(a, b) {
   const apiKey = getOrsApiKey();
   if (!apiKey) {
     usedWalkEstimateFallback = true;
-    return estimateWalkMinutes(haversineKm(a, b));
+    return {
+      minutes: estimateWalkMinutes(haversineKm(a, b)),
+      geometry: [[a.lat, a.lng], [b.lat, b.lng]],
+      estimated: true,
+    };
   }
 
   const url = new URL("https://api.openrouteservice.org/v2/directions/foot-walking");
@@ -121,8 +130,17 @@ async function walkTime(a, b) {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`ORS request failed: ${res.status}`);
   const data = await res.json();
-  const seconds = data.features[0].properties.summary.duration;
-  return seconds / 60;
+  const feature = data.features[0];
+  return {
+    minutes: feature.properties.summary.duration / 60,
+    geometry: feature.geometry.coordinates.map(([lng, lat]) => [lat, lng]),
+    estimated: false,
+  };
+}
+
+// Convenience wrapper for callers that only need the duration.
+async function walkTime(a, b) {
+  return (await walkRoute(a, b)).minutes;
 }
 
 // =========================================================================
@@ -151,7 +169,10 @@ async function stopsNear(origin, maxWalkMinutes) {
     s => estimateWalkMinutes(haversineKm(origin, s)) <= maxWalkMinutes * 1.3
   );
   const withWalkTimes = await Promise.all(
-    candidates.map(async s => ({ stop: s, walk: await walkTime(origin, s) }))
+    candidates.map(async s => {
+      const leg = await walkRoute(origin, s);
+      return { stop: s, walk: leg.minutes, walkGeometry: leg.geometry, walkEstimated: leg.estimated };
+    })
   );
   return withWalkTimes.filter(x => x.walk <= maxWalkMinutes);
 }
@@ -172,17 +193,21 @@ async function bestRoute(fromCar, targetBuilding, permit) {
     const destination = fromCar ? targetBuilding : lot;
 
     const nearOrigin = await stopsNear(origin, 15);
-    for (const { stop, walk: walk1 } of nearOrigin) {
+    for (const { stop, walk: walk1, walkGeometry: walk1Geometry, walkEstimated: walk1Estimated } of nearOrigin) {
       for (const route of stop.routes) {
         const wait = await getNextArrival(stop.id, route);
         const dropCandidates = stopsOnRoute(route).filter(s => s.id !== stop.id);
         for (const dropStop of dropCandidates) {
-          const walk2 = await walkTime(dropStop, destination);
-          if (walk2 > 15) continue;
+          const walk2Leg = await walkRoute(dropStop, destination);
+          if (walk2Leg.minutes > 15) continue;
           const rideTime = scheduledRideTime(stop, dropStop, route);
-          const total = walk1 + wait + rideTime + walk2;
+          const total = walk1 + wait + rideTime + walk2Leg.minutes;
           if (!best || total < best.total) {
-            best = { lot, stop, route, dropStop, walk1, wait, rideTime, walk2, total };
+            best = {
+              lot, stop, route, dropStop, walk1, wait, rideTime, total,
+              walk1Geometry, walk1Estimated,
+              walk2: walk2Leg.minutes, walk2Geometry: walk2Leg.geometry, walk2Estimated: walk2Leg.estimated,
+            };
           }
         }
       }
@@ -193,7 +218,68 @@ async function bestRoute(fromCar, targetBuilding, permit) {
 }
 
 // =========================================================================
-// 5. UI
+// 5. MAP — Leaflet + OpenStreetMap tiles (no Apple/Google account needed)
+// =========================================================================
+
+let map = null;
+let mapLayers = [];
+
+function initMap() {
+  if (map) return;
+  map = L.map("map").setView([40.0067, -83.0305], 15); // OSU campus
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+    maxZoom: 19,
+  }).addTo(map);
+}
+
+function clearMapLayers() {
+  mapLayers.forEach(layer => map.removeLayer(layer));
+  mapLayers = [];
+}
+
+// Draws the winning route from bestRoute() on the map: markers for each leg's
+// endpoints, real walking paths where available (dashed when estimated), and
+// a straight dashed line for the bus leg (CABS route shapes aren't sourced yet).
+function drawRouteOnMap(result, fromCar, building) {
+  initMap();
+  clearMapLayers();
+
+  const origin = fromCar ? result.lot : building;
+  const destination = fromCar ? building : result.lot;
+
+  const addMarker = (point, label) => {
+    mapLayers.push(L.marker([point.lat, point.lng]).addTo(map).bindPopup(label));
+  };
+  addMarker(origin, origin === result.lot ? result.lot.name : building.name);
+  addMarker(result.stop, `Board here: ${result.stop.name} (route ${result.route})`);
+  addMarker(result.dropStop, `Get off here: ${result.dropStop.name}`);
+  addMarker(destination, destination === result.lot ? result.lot.name : building.name);
+
+  mapLayers.push(L.polyline(result.walk1Geometry, {
+    color: "#2a7", weight: 4, dashArray: result.walk1Estimated ? "6 6" : null,
+  }).addTo(map));
+
+  mapLayers.push(L.polyline(
+    [[result.stop.lat, result.stop.lng], [result.dropStop.lat, result.dropStop.lng]],
+    { color: "#c33", weight: 4, dashArray: "2 8" }
+  ).addTo(map).bindPopup("Bus leg — straight line shown; the real CABS route path isn't loaded yet"));
+
+  mapLayers.push(L.polyline(result.walk2Geometry, {
+    color: "#2a7", weight: 4, dashArray: result.walk2Estimated ? "6 6" : null,
+  }).addTo(map));
+
+  const allPoints = [
+    ...result.walk1Geometry,
+    [result.stop.lat, result.stop.lng],
+    [result.dropStop.lat, result.dropStop.lng],
+    ...result.walk2Geometry,
+  ];
+  map.fitBounds(allPoints, { padding: [30, 30] });
+}
+
+// =========================================================================
+// 6. UI
 // =========================================================================
 
 const orsKeyInput = document.getElementById("orsKeyInput");
@@ -263,6 +349,7 @@ async function runRoute(entry, fromCar) {
       `Ride to: ${result.dropStop.name} (~${result.rideTime.toFixed(1)} min)\n` +
       `Walk to destination: ${result.walk2.toFixed(1)} min\n` +
       `Total: ~${result.total.toFixed(1)} min`;
+    drawRouteOnMap(result, fromCar, building);
   } catch (err) {
     resultBox.textContent = `Error: ${err.message}`;
   }
