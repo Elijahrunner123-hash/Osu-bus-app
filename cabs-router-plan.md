@@ -41,7 +41,52 @@ One entry per class meeting (repeat for MWF vs TTh as separate entries, not a si
 
 ---
 
-## 2. Real-Time Bus Data — Full Walkthrough
+## 2. Official CABS Data API — FOUND (supersedes §2.1 proxy work)
+
+OSU publishes an **unauthenticated, CORS-enabled public JSON API** at `content.osu.edu/v2/bus`.
+No API key, no OSU login, no proxy capture, no reverse engineering. Verified 2026-08-23; every
+`GET` returns `access-control-allow-origin: *`, so the browser app can call it directly.
+
+Responses are all shaped `{ status, lastModified, data: { ... } }`.
+
+| Endpoint | Returns |
+|---|---|
+| `GET /v2/bus/routes` | All routes: `code`, `name`, `color`, `darkColor`, `service`, `showByDefault` |
+| `GET /v2/bus/stops` | All 57 stops: `id`, `name`, `latitude`, `longitude`, and the `routes` each serves |
+| `GET /v2/bus/routes/{CODE}` | `{ patterns, stops }` — `stops` is the **ordered** stop sequence for that route; each pattern has `direction` (`ib`/`ob`), `id`, `length` (feet), and `encodedPolyline` (Google encoded polyline of the real route shape) |
+| `GET /v2/bus/routes/{CODE}/vehicles` | Live buses: `latitude`, `longitude`, `heading`, `speed`, `destination`, `delayed`, `patternId`, plus a `predictions[]` array |
+
+Route codes: `BE`, `CC`, `CLS`, `ER`, `MC`, `NWC`, `WMC` (plus `ACK`, `JPS`, `MM` med-center shuttles).
+
+Each entry in a vehicle's `predictions[]` is exactly the arrival estimate the REALTIME section needs:
+
+```
+{ routeCode, stopId, stopName, type: "arrival"|"departure",
+  predictionCountdown: "16", timeToArrivalInSeconds: 1080,
+  predictionTime: "2026-08-23T19:40:00.000Z", destination, vehicleId,
+  vehicleDistanceInFeet, isDelayed, systemTime }
+```
+
+So `getNextArrival(stopId, routeId)` becomes: fetch `/routes/{routeId}/vehicles`, flatten every
+vehicle's `predictions`, keep those matching `stopId`, and take the minimum
+`timeToArrivalInSeconds`. One request per route, cacheable for ~20–30s.
+
+### Known gaps in this API
+
+- **No timetable endpoint.** Predictions only exist while buses are actually running; every route
+  polled on a Sunday evening returned `vehicles: []`. Planning a trip for tomorrow morning, or any
+  time outside service hours, still needs a fallback (the current headway guess, or scraped
+  published schedules). Treat an empty `vehicles` array as "no live data", not "no service".
+- **`MC` route disagrees with the website.** `/routes/MC` lists only 2 stops (Carmack 2, Uh Doan)
+  while `ttm.osu.edu/cabs-bus-stop-list` lists 6. Prefer the API but verify this one by eye.
+- **`WMC` uses a different backend** (`service: "double"` rather than `"clever"`); its vehicles
+  carry no `predictions`, its pattern `length` is bogus (`1`), and one stop id is a raw UUID.
+  Its stop ids also look different (`MC4`, `MC7`, `MC82`).
+- Stop ids are strings, not integers (`"75"`, `"MC7"`) — do not coerce them.
+
+---
+
+## 2-OLD. Real-Time Bus Data — Proxy Walkthrough (superseded, kept for reference)
 
 ### 2.0 The concept, from scratch
 
@@ -185,13 +230,21 @@ Keeping UI code out of the data-fetching functions (no fetch calls buried inside
 
 ## 7. Open Research TODOs Before/While Coding
 
-- [ ] Transcribe CABS stop coordinates (from ttm.osu.edu/cabs route pages, or find if a GTFS feed exists via Moovit's backend)
-- [ ] Geocode Carmack and Buckeye lot coordinates
-- [ ] Geocode your specific class building(s)
-- [ ] Sign up for a free OpenRouteService API key
-- [ ] Install Proxyman on your phone, install its certificate, do a first capture session against the official Ohio State app's bus tracker
-- [ ] Identify the live-bus request in the capture; note whether it needs an auth header (and if so, what kind — static key vs. login-based token)
-- [ ] Decide how you're estimating ride time between stops until real-time data calibrates it
+Resolved:
+
+- [x] ~~Transcribe CABS stop coordinates~~ — `content.osu.edu/v2/bus/stops` gives all 57 with ids and coordinates (§2).
+- [x] ~~Proxyman capture against the Ohio State app~~ — unnecessary; the public API needs no auth (§2).
+- [x] ~~Determine whether the live-bus endpoint needs auth~~ — it does not. No OSU credentials are involved, which retires the §"Key constraints" pause-point.
+- [x] Geocode Carmack and Buckeye lot coordinates (currently the corresponding bus-stop coordinates, not lot centers — good enough, revisit if drive times look wrong).
+- [x] Geocode the Biology 1113 buildings (Campbell Hall, Jennings Hall).
+
+Still open:
+
+- [ ] Sign up for a free OpenRouteService API key (until then, walk/drive times are haversine estimates).
+- [ ] Decide the fallback when `vehicles` is empty (outside service hours / planning ahead) — published headways per route, or scraped timetables.
+- [ ] Confirm the `MC` route stop list; the API and the website disagree (§2).
+- [ ] Reconcile lot → stop mapping now that real stop ids exist (`75` Buckeye Lot Loop, `403` Carmack 2, `94`/`95` Carmack 5).
+- [ ] Calibrate ride time from observed `timeToArrivalInSeconds` between consecutive stops rather than the static haversine estimate.
 
 ---
 
