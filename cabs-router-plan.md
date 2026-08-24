@@ -81,7 +81,15 @@ vehicle's `predictions`, keep those matching `stopId`, and take the minimum
   while `ttm.osu.edu/cabs-bus-stop-list` lists 6. Prefer the API but verify this one by eye.
 - **`WMC` uses a different backend** (`service: "double"` rather than `"clever"`); its vehicles
   carry no `predictions`, its pattern `length` is bogus (`1`), and one stop id is a raw UUID.
-  Its stop ids also look different (`MC4`, `MC7`, `MC82`).
+  Its stop ids also look different (`MC4`, `MC7`, `MC82`). Its `routeStopOrder` is also *not*
+  a travel order along its polyline — the stops snap to the shape within a metre, but their
+  indices run 38, 0, 13, 11, 4, 58, 53, so drawing between consecutive WMC stops wraps most of
+  the way round the loop (path/straight-line ratios of 15-37x). Every `clever` route is
+  monotonic and draws correctly; only WMC is affected, and it is unreachable from the Carmack
+  and Buckeye lots, so this is filed rather than fixed.
+- **`MC` publishes only one direction** (`ob`, Uh Doan -> Carmack 2). The return trip has no
+  shape of its own, so `busGeometry()` walks that shape in reverse. Fine for an out-and-back
+  shuttle; revisit if MC ever becomes a loop.
 - Stop ids are strings, not integers (`"75"`, `"MC7"`) — do not coerce them.
 
 ---
@@ -149,6 +157,23 @@ Once you've found the real endpoint, only the *inside* of this one function chan
 ---
 
 ## 3. Walking Directions — Open Source, No Apple Dependency
+
+> **Resolved (2026-08-24): Valhalla, not ORS.** OpenRouteService turned out to be a poor fit for a
+> browser app. Its error responses omit `Access-Control-Allow-Origin`, so when it refuses a request
+> the browser sees an opaque `Failed to fetch` and cannot tell a rejected key from a dead network —
+> the app silently drew straight lines and blamed the missing key. Its free tier is also only
+> **40 requests/minute**.
+>
+> FOSSGIS's public Valhalla instance (`valhalla1.openstreetmap.de`) needs no key or account, sends
+> `access-control-allow-origin: *` on success *and* on errors, is genuinely profile-aware
+> (`pedestrian` ~5 km/h, `auto` ~22 km/h), and answers a preflight-free `GET ?json=`. It is now the
+> default; ORS is tried first only when the user has set a key. Note its shapes are encoded at
+> 6 decimal places, not 5.
+>
+> OSRM's demo server was evaluated and **rejected**: `router.project-osrm.org` ignores the profile
+> in the URL and serves car speeds for `/foot/` (2.46 km in 335 s ≈ 26 km/h), so walking times
+> would have been wrong in a way that looks plausible.
+
 
 Swapped out MapKit JS for this reason: it requires your Apple Developer account to keep working, and you don't want the app to break if that account lapses. Two open-source options instead — same idea (send two coordinates, get back a walking time), no Apple account involved.
 
