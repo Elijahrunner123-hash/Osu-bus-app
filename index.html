@@ -1174,6 +1174,27 @@ let mapUnavailable = false;
 
 const PIN_SVG = '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2a7 7 0 0 0-7 7c0 5.2 7 13 7 13s7-7.8 7-13a7 7 0 0 0-7-7z"/><circle cx="12" cy="9" r="2.6" fill="#fff"/></svg>';
 
+// Basemap tiles: Esri's gray canvas, keyless and unwatermarked, in a matching
+// light/dark pair. CARTO — the previous provider — ended anonymous access and
+// began stamping "API KEY REQUIRED" diagonally across every tile it served, so
+// it had to go; the app's rule about preferring keyless services the user never
+// configures is what picked the replacement. A muted ground is also the point:
+// the CABS route colours have to stay the most vivid thing on screen.
+// Note the {z}/{y}/{x} order — Esri puts row before column, unlike most tile
+// servers. Both styles serve to z19 (verified), which covers the app's zooms.
+const ESRI_BASE = "https://services.arcgisonline.com/ArcGIS/rest/services/Canvas";
+const BASEMAP_OPTIONS = {
+  attribution: 'Tiles &copy; <a href="https://www.esri.com/">Esri</a> &mdash; Esri, HERE, Garmin, &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+  maxZoom: 19,
+};
+const basemapUrl = dark =>
+  `${ESRI_BASE}/World_${dark ? "Dark" : "Light"}_Gray_Base/MapServer/tile/{z}/{y}/{x}`;
+const prefersDark = () =>
+  typeof window !== "undefined" && window.matchMedia
+    ? window.matchMedia("(prefers-color-scheme: dark)").matches
+    : false;
+let tileLayer = null;
+
 function initMap() {
   if (map || mapUnavailable) return;
   if (typeof L === "undefined") {
@@ -1183,10 +1204,18 @@ function initMap() {
   }
   map = L.map("map", { zoomControl: false, attributionControl: true })
     .setView([defaultLocation.lat, defaultLocation.lng], 15);
-  L.tileLayer("https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png", {
-    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>',
-    maxZoom: 20,
-  }).addTo(map);
+  tileLayer = L.tileLayer(basemapUrl(prefersDark()), BASEMAP_OPTIONS).addTo(map);
+
+  // Follow the viewer's theme live: Esri publishes a matching dark canvas, so
+  // the map can track light/dark instead of staying light like CARTO's single
+  // style did. Swapping the layer in place keeps every route polyline intact.
+  const darkQuery = window.matchMedia("(prefers-color-scheme: dark)");
+  const onThemeChange = () => {
+    if (!map || !tileLayer) return;
+    tileLayer.setUrl(basemapUrl(darkQuery.matches));
+  };
+  if (darkQuery.addEventListener) darkQuery.addEventListener("change", onThemeChange);
+  else if (darkQuery.addListener) darkQuery.addListener(onThemeChange); // older Safari
 }
 
 function setUserMarker(loc) {
