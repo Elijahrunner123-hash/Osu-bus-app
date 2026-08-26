@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// Regenerates the `routes`, `stops`, `routeStopOrder` and `routePatterns`
-// literals baked into index.html's DATA
+// Regenerates the `routes`, `stops` and `routePatterns` literals baked into
+// index.html's DATA
 // section from OSU's public bus API (content.osu.edu/v2/bus). Plain Node, no
 // dependencies — uses the built-in `fetch`.
 //
@@ -57,7 +57,6 @@ async function main() {
     if (!res.ok) throw new Error(`route ${r.code} fetch failed: ${res.status}`);
     const json = await res.json();
     detail[r.code] = {
-      stopOrder: (json.data.stops || []).map(s => s.id),
       patterns: (json.data.patterns || [])
         .filter(p => p.encodedPolyline)
         .map(p => ({ id: String(p.id), direction: p.direction, polyline: p.encodedPolyline })),
@@ -86,14 +85,6 @@ async function main() {
     console.log(`  { id: ${jsString(s.id)}, name: ${jsString(s.name)}, lat: ${s.lat}, lng: ${s.lng}, routes: [${s.routes.map(jsString).join(", ")}] },`);
   }
   console.log("];");
-  console.log();
-  console.log("// Ordered stop sequence per route, straight from the API — used to");
-  console.log("// pick the pattern whose direction actually goes board -> alight.");
-  console.log("const routeStopOrder = {");
-  for (const r of routes) {
-    console.log(`  ${r.code}: [${detail[r.code].stopOrder.map(jsString).join(", ")}],`);
-  }
-  console.log("};");
   console.log();
   console.log("// Google-encoded polylines of the real road-following route shapes.");
   console.log("const routePatterns = {");

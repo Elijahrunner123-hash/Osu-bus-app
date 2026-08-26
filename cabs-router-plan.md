@@ -266,10 +266,10 @@ Resolved:
 Still open:
 
 - [ ] Sign up for a free OpenRouteService API key (until then, walk/drive times are haversine estimates).
-- [ ] Decide the fallback when `vehicles` is empty (outside service hours / planning ahead) — published headways per route, or scraped timetables.
+- [x] ~~Decide the fallback when `vehicles` is empty~~ — `serviceSchedule` in the DATA section holds CABS's published hours and headways per route per time band, transcribed from ttm.osu.edu. Wait becomes headway/2; a route outside its bands is excluded from the search entirely. Regular-term only; break/summer/holiday variants need an academic calendar we have no source for.
 - [ ] Confirm the `MC` route stop list; the API and the website disagree (§2).
 - [ ] Reconcile lot → stop mapping now that real stop ids exist (`75` Buckeye Lot Loop, `403` Carmack 2, `94`/`95` Carmack 5).
-- [ ] Calibrate ride time from observed `timeToArrivalInSeconds` between consecutive stops rather than the static haversine estimate.
+- [ ] Calibrate ride time from observed `timeToArrivalInSeconds` between consecutive stops rather than the static haversine estimate. (Arrivals are now live, so the data for this is in hand — `scheduledRideTime` is the last remaining invented number.)
 
 ---
 
