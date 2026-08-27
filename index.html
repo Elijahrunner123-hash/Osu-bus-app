@@ -170,15 +170,39 @@
 
   .note { background: rgba(255,149,0,0.14); color: var(--orange); border-radius: 11px; padding: 10px 13px; font-size: .82rem; margin: 12px 0; }
 
+  /* Primary CTA — "Generate route" / "Save schedule". No prior primary
+     button existed in this file to reuse; every other control here still
+     reuses .chip/.segmented/.note. */
+  .btn-primary {
+    display: block; width: 100%; box-sizing: border-box; border: none; border-radius: 13px;
+    background: var(--blue); color: #fff; font: inherit; font-weight: 600; font-size: 1rem;
+    padding: 14px 0; margin: 4px 0 16px; cursor: pointer; text-align: center;
+  }
+  .btn-primary:active { opacity: 0.85; }
+
+  /* Back / refresh row atop the route view — plain .chip pills, reused rather
+     than a bespoke button style. */
+  .toprow { display: flex; gap: 8px; margin-bottom: 14px; }
+  .toprow .chip:disabled { opacity: 0.5; }
+
   details.settings { margin-top: 18px; border-top: 0.5px solid var(--sep); padding-top: 12px; }
   details.settings summary { color: var(--label2); font-size: .9rem; cursor: pointer; list-style: none; }
   details.settings summary::-webkit-details-marker { display: none; }
   details.settings label { display: block; font-size: .82rem; color: var(--label2); margin: 12px 0 4px; }
-  details.settings input {
-    width: 100%; box-sizing: border-box; padding: 10px 12px; font: inherit; font-size: .9rem;
+  details.settings input, details.settings select {
+    box-sizing: border-box; padding: 10px 12px; font: inherit; font-size: .9rem;
     border: 0.5px solid var(--sep); border-radius: 10px; background: var(--card); color: var(--label);
   }
+  details.settings input { width: 100%; }
   details.settings .hint { font-size: .78rem; color: var(--label3); margin-top: 6px; line-height: 1.4; }
+
+  /* Schedule editor rows */
+  .sched-row {
+    display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+    padding: 10px 0; border-bottom: 0.5px solid var(--sep);
+  }
+  .sched-row select, .sched-row input[type="time"] { width: auto; flex: 1 1 92px; }
+  .sched-row input[type="text"] { width: auto; flex: 1 1 100%; }
 </style>
 </head>
 <body>
@@ -193,7 +217,7 @@
 
 <div id="sheet">
   <div id="sheetHandle"><div class="grabber"></div></div>
-  <div id="sheetContent"><div class="loading">Getting your location…</div></div>
+  <div id="sheetContent"><div class="loading">Loading live buses…</div></div>
 </div>
 
 <script>
@@ -363,6 +387,10 @@ const buildings = [
   { id: "jennings-hall", name: "Jennings Hall", lat: 39.9967622, lng: -83.0154345 },
 ];
 
+// SEED only — the working copy lives in localStorage from the first run
+// onward (see loadSchedule()/saveSchedule() below) so it's user-editable from
+// Settings without a rebuild. Every reader in the app must go through
+// state.schedule / loadSchedule(), never this const directly.
 const schedule = [
   { day: "Mon", start: "10:20", end: "11:15", building: "campbell-hall", course: "Biology 1113 Lecture" },
   { day: "Wed", start: "10:20", end: "11:15", building: "campbell-hall", course: "Biology 1113 Lecture" },
@@ -371,6 +399,47 @@ const schedule = [
 ];
 
 const buildingById = id => buildings.find(b => b.id === id);
+
+// ---- Schedule persistence — localStorage is the source of truth from the
+// first run onward; `schedule` above is only ever the seed for it.
+// Re-seeding is reserved for genuinely absent or unusable data: no key at
+// all, JSON that doesn't parse, or a value that isn't an array. Once we have
+// a real array, an EMPTY one is a legitimate user state (they deleted every
+// class — the seeded ones are a stranger's schedule, not theirs) and must
+// come back empty, not silently repopulated; currentTripContext() already
+// handles entry: null / "No class today" correctly for it. Individual bad
+// entries (missing fields, a building id that no longer resolves) are
+// filtered out one at a time rather than discarding the whole list — losing
+// every class because one row is malformed, or because a building was
+// renamed out from under a saved entry, would be wildly disproportionate.
+// Whatever this returns is exactly what both the Settings editor and the
+// planner see (state.schedule) — never two different counts in two places.
+const SCHEDULE_KEY = "cabsSchedule";
+const HHMM_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+function isValidScheduleEntry(e) {
+  return !!e && typeof e === "object"
+    && DAY_NAMES.includes(e.day)
+    && typeof e.start === "string" && HHMM_RE.test(e.start)
+    && typeof e.end === "string" && HHMM_RE.test(e.end)
+    && typeof e.building === "string" && !!buildingById(e.building);
+}
+function saveSchedule(entries) {
+  localStorage.setItem(SCHEDULE_KEY, JSON.stringify(entries));
+}
+function loadSchedule() {
+  try {
+    const raw = localStorage.getItem(SCHEDULE_KEY);
+    if (!raw) { saveSchedule(schedule); return schedule.slice(); }
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return schedule.slice();
+    return parsed.filter(isValidScheduleEntry).map(e => ({
+      day: e.day, start: e.start, end: e.end, building: e.building,
+      course: (e.course || "").toString(),
+    }));
+  } catch {
+    return schedule.slice();
+  }
+}
 
 // =========================================================================
 // 2. WALKING / DRIVING — routeLeg(a, b, profile) via OSRM
@@ -770,12 +839,14 @@ function getUserLocation() {
 const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 function parseHM(s) { const [h, m] = s.split(":").map(Number); return h * 60 + m; }
 
-// Pure: given a Date, decide today's most-relevant class and whether the user is
-// arriving (before it starts) or leaving (once it has started/ended).
+// Given a Date, decide today's most-relevant class and whether the user is
+// arriving (before it starts) or leaving (once it has started/ended). Reads
+// the user's stored schedule (loadSchedule(), §1) — its own localStorage read
+// is the only impurity; nothing here has a side effect.
 // Returns { mode, entry, today } — entry is null when nothing is scheduled today.
 function currentTripContext(now) {
   const day = DAY_NAMES[now.getDay()];
-  const today = schedule
+  const today = loadSchedule()
     .filter(e => e.day === day)
     .sort((a, b) => parseHM(a.start) - parseHM(b.start));
   if (today.length === 0) return { mode: "arrive", entry: null, today: [] };
@@ -972,13 +1043,18 @@ const AVG_BUS_KMH = 15;
 // — plus each vehicle's projection, already computed once per warm cycle by
 // fetchRoutePredictions(). Diverges from the API's own predictions when a bus
 // is dwelling at a stop, so this is a fallback, never a replacement.
-function derivedArrival(cached, stop, pattern) {
+// The distance-along-the-shape half of the computation, shared by
+// derivedArrival() below (minutes, for the search/refine paths) and the
+// route view's manual/auto refresh (§7, raw km, for the "bus 0.6 mi away"
+// display) — both need "how far is the nearest upstream vehicle on this
+// pattern from this stop", just converted differently at the end.
+function nearestVehicleDistanceKm(cached, stop, pattern) {
   if (!cached || !cached.vehicles || !cached.vehicles.length) return null;
   const stopProj = stopIndexOn(pattern, stop);
   if (stopProj.km > VEHICLE_SNAP_KM) return null;
   const cum = cumulativeKm(pattern);
   const loop = isLoopPattern(pattern);
-  let bestMinutes = Infinity;
+  let bestKm = Infinity;
   for (const v of cached.vehicles) {
     if (!v.proj || v.proj.pattern.id !== pattern.id || v.proj.km > VEHICLE_SNAP_KM) continue;
     let distanceKm;
@@ -989,10 +1065,16 @@ function derivedArrival(cached, stop, pattern) {
     } else {
       continue; // a one-way pattern where the bus is already past the stop doesn't serve it
     }
-    const minutes = (distanceKm / AVG_BUS_KMH) * 60;
-    if (minutes < bestMinutes) bestMinutes = minutes;
+    if (distanceKm < bestKm) bestKm = distanceKm;
   }
-  return isFinite(bestMinutes) ? { minutes: Math.max(0, bestMinutes), live: true, derived: true } : null;
+  return isFinite(bestKm) ? bestKm : null;
+}
+
+function derivedArrival(cached, stop, pattern) {
+  const km = nearestVehicleDistanceKm(cached, stop, pattern);
+  if (km == null) return null;
+  const minutes = (km / AVG_BUS_KMH) * 60;
+  return { minutes: Math.max(0, minutes), live: true, derived: true };
 }
 
 // The search below runs entirely on cheap local estimates — no network at all.
@@ -1318,11 +1400,85 @@ function drawVehicleMarkers(routeCode) {
   }
 }
 
+// ---- Browse view (landing) map layers ----
+// The browse view draws every ENABLED route's own shape (thin/faint, its
+// CABS colour) plus live vehicles for all of them at once — unlike
+// drawVehicleMarkers() above, which is the single-route version the route
+// view uses for just the chosen itinerary's bus leg. Both share the same
+// mapLayers/vehicleMarkers arrays and clear functions: whichever view is
+// active owns the map outright, and switching views clears the other's
+// layers via clearMapLayers()/clearVehicleMarkers() before drawing its own.
+const ENABLED_ROUTES_KEY = "enabledRoutes";
+function allRouteCodes() { return new Set(routes.map(r => r.code)); }
+function loadEnabledRoutes() {
+  try {
+    const raw = localStorage.getItem(ENABLED_ROUTES_KEY);
+    if (!raw) return allRouteCodes();
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return allRouteCodes();
+    const valid = allRouteCodes();
+    // An intentionally-empty selection (every route toggled off) is honored —
+    // unlike the schedule, there's no meaningful "corrupt vs. deliberate"
+    // ambiguity here: any string that isn't a real route code is just dropped.
+    return new Set(parsed.filter(c => valid.has(c)));
+  } catch {
+    return allRouteCodes();
+  }
+}
+function saveEnabledRoutes(set) {
+  localStorage.setItem(ENABLED_ROUTES_KEY, JSON.stringify([...set]));
+}
+let enabledRoutes = allRouteCodes();
+
+function drawBrowseRoutes() {
+  initMap();
+  if (!map) return;
+  clearMapLayers();
+  for (const code of enabledRoutes) {
+    const color = routeColor(code) || "#8e8e93";
+    for (const pattern of routePatterns[code] || []) {
+      const pts = patternPoints(pattern);
+      if (pts.length < 2) continue;
+      mapLayers.push(L.polyline(pts, { color, weight: 2, opacity: 0.5 }).addTo(map));
+    }
+  }
+}
+
+// No network call — reads whatever warmPredictions() last cached per route.
+function drawBrowseVehicles() {
+  clearVehicleMarkers();
+  if (!map) return;
+  for (const code of enabledRoutes) {
+    const cached = predictionCache.get(code);
+    if (!cached) continue;
+    const color = routeColor(code) || "#8e8e93";
+    for (const v of cached.vehicles || []) {
+      if (typeof v.lat !== "number" || typeof v.lng !== "number") continue;
+      vehicleMarkers.push(
+        L.marker([v.lat, v.lng], { icon: busMarkerIcon(color, v.heading), interactive: false, keyboard: false }).addTo(map)
+      );
+    }
+  }
+}
+
 // =========================================================================
 // 7. UI — full-screen map + draggable frosted bottom sheet
 // =========================================================================
 
-const state = { location: { ...defaultLocation, estimated: true }, mode: "arrive", entry: null, today: [], permit: null };
+// Which half of the app owns the map + sheet right now. Every render/draw
+// path below is routed through this so the two views can't fight over either
+// — switching always clears the other's map layers before drawing its own.
+let viewMode = "browse"; // "browse" | "route"
+// The itinerary currently on screen (route view only), so the refresh button
+// and the ticker can share one code path (refreshBusLeg()) instead of each
+// keeping their own copy of "what's the current result".
+let currentResult = null;
+// Whether the Settings <details> was left open, so any full sheet re-render
+// (schedule save, mode/chip switch, route toggle) can restore it instead of
+// silently collapsing it out from under an in-progress edit.
+let settingsOpen = false;
+
+const state = { location: { ...defaultLocation, estimated: true }, mode: "arrive", entry: null, today: [], permit: null, schedule: [] };
 
 function debugNow() {
   const p = new URLSearchParams(location.search).get("now");
@@ -1334,6 +1490,10 @@ const clockNow = () => debugNow() || new Date();
 
 const fmtMin = m => `${Math.max(1, Math.round(m))} min`;
 const fmtClock = d => d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+const fmtMi = km => {
+  const mi = km * 0.621371;
+  return mi < 0.1 ? "<0.1 mi" : `${mi.toFixed(1)} mi`;
+};
 
 const STEP_ICON = {
   drive: '<svg viewBox="0 0 24 24"><path d="M4 13l1.6-4.6A2.5 2.5 0 0 1 8 7h8a2.5 2.5 0 0 1 2.4 1.4L20 13v4a1 1 0 0 1-1 1h-1a1 1 0 0 1-1-1v-1H7v1a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1z"/><path d="M7.5 14.5h.01M16.5 14.5h.01"/></svg>',
@@ -1408,11 +1568,17 @@ function fileProtocolNote() {
 function waitText(leg) {
   const wait = Math.round(leg.wait || 0);
   const ride = Math.round(leg.minutes);
+  // Set by refreshBusLeg() (manual refresh button + the 30s ticker, one
+  // shared code path) from nearestVehicleDistanceKm() — how far the nearest
+  // upstream bus on the right pattern currently is from the boarding stop.
+  // Absent until the first refresh resolves, and null when nothing usable is
+  // on the pattern right now, so it's additive rather than assumed present.
+  const distSuffix = leg.distanceKm != null ? ` · bus ${fmtMi(leg.distanceKm)} away` : "";
   if (leg.live && leg.derived)
-    return `~${wait <= 0 ? "due" : `${wait} min`} (from bus location) · ride ~${ride} min`;
+    return `~${wait <= 0 ? "due" : `${wait} min`} (from bus location) · ride ~${ride} min${distSuffix}`;
   return leg.live
-    ? `Next bus ${wait <= 0 ? "due now" : `in ${wait} min`} · ride ~${ride} min`
-    : `~${wait} min (scheduled) · ride ~${ride} min`;
+    ? `Next bus ${wait <= 0 ? "due now" : `in ${wait} min`} · ride ~${ride} min${distSuffix}`
+    : `~${wait} min (scheduled) · ride ~${ride} min${distSuffix}`;
 }
 
 function stepRow(leg) {
@@ -1437,11 +1603,21 @@ function classLabel(entry) {
 }
 
 function chipsHtml() {
-  const list = state.today.length ? state.today : schedule;
+  const list = state.today.length ? state.today : state.schedule;
   if (!list.length) return "";
   return `<div class="chips">${list.map((e, i) =>
     `<button class="chip ${e === state.entry ? "active" : ""}" data-idx="${i}">${classLabel(e)}</button>`
   ).join("")}</div>`;
+}
+
+// Back-to-browse (+ refresh, on a resolved itinerary) row shown atop every
+// route-view screen, including the loading/error/no-route ones — the user
+// must always be able to get back to the live map, not just from a success.
+function topRowHtml(withRefresh) {
+  return `<div class="toprow">
+    <button type="button" class="chip" data-back-browse>&lsaquo; Live buses</button>
+    ${withRefresh ? `<button type="button" class="chip" data-refresh-route>Refresh</button>` : ""}
+  </div>`;
 }
 
 function renderSheet(result) {
@@ -1455,9 +1631,10 @@ function renderSheet(result) {
     : `Parked at ${result.lot.name}`;
 
   const calloutLabel = result.mode === "arrive" ? "Park at" : "Your car";
-  const list = state.today.length ? state.today : schedule;
+  const list = state.today.length ? state.today : state.schedule;
 
   document.getElementById("sheetContent").innerHTML = `
+    ${topRowHtml(true)}
     <div class="sheet-title">${heading}</div>
     <div class="sheet-sub">${sub}</div>
 
@@ -1493,12 +1670,102 @@ function renderSheet(result) {
   wireSheetControls();
 }
 
-function settingsHtml() {
+// One row of the schedule editor. Building is deliberately a <select>
+// populated from `buildings`, never free text — a typo'd id would only
+// surface later as planTrip()'s "isn't in the buildings data" error.
+function scheduleRowHtml(e, i) {
+  const buildingField = buildings.length
+    ? `<select data-sched-building="${i}">${buildings.map(b =>
+        `<option value="${b.id}" ${b.id === e.building ? "selected" : ""}>${b.name}</option>`).join("")}</select>`
+    : `<span class="note" style="margin:0;">No buildings configured</span>`;
+  const course = (e.course || "").replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
   return `
-    <details class="settings">
+    <div class="sched-row" data-sched-row="${i}">
+      <select data-sched-day="${i}">
+        ${DAY_NAMES.map(d => `<option value="${d}" ${d === e.day ? "selected" : ""}>${d}</option>`).join("")}
+      </select>
+      <input type="time" data-sched-start="${i}" value="${e.start}">
+      <input type="time" data-sched-end="${i}" value="${e.end}">
+      ${buildingField}
+      <input type="text" data-sched-course="${i}" value="${course}" placeholder="Course (optional)">
+      <button type="button" class="chip" data-sched-del="${i}">Delete</button>
+    </div>`;
+}
+
+function settingsHtml() {
+  const list = state.schedule;
+  return `
+    <details class="settings" ${settingsOpen ? "open" : ""}>
       <summary>Settings</summary>
       <div class="hint">Walking and driving paths come from FOSSGIS's public OSRM instances (routing.openstreetmap.de), with Valhalla (valhalla1.openstreetmap.de) as a fallback — no key or account needed for either. Live bus arrivals and positions come from OSU's public CABS feed; a route that publishes live positions but no arrival prediction for a stop (Ackerman, Morehouse, and the Wexner Medical Center shuttles never publish predictions at all) gets an ETA estimated from its nearest bus's own position instead. When none of these have fresh data, this falls back to a straight-line estimate or the published timetable, noted above when that happens.</div>
+
+      <label>Weekly schedule</label>
+      <div id="scheduleRows">${list.length
+        ? list.map((e, i) => scheduleRowHtml(e, i)).join("")
+        : `<div class="note">No classes yet. Add one below.</div>`}</div>
+      ${buildings.length
+        ? `<button type="button" class="chip" data-sched-add style="margin-top:8px;">+ Add class</button>`
+        : `<div class="note">No buildings are configured, so a class can't be added yet.</div>`}
+      <button type="button" class="btn-primary" data-sched-save style="margin-top:12px;">Save schedule</button>
     </details>`;
+}
+
+// Shared by both views' Settings panel: tracks open/closed so a later full
+// re-render (schedule save, mode/chip switch, route toggle) can restore it
+// instead of silently collapsing it mid-edit, and wires the schedule editor.
+// The editor keeps its own in-memory draft (add/delete/edit only touch
+// #scheduleRows, never the whole sheet) so nothing outside an explicit Save
+// click can lose unsaved changes.
+function wireSettingsControls() {
+  const details = document.querySelector("details.settings");
+  if (details) details.addEventListener("toggle", () => { settingsOpen = details.open; });
+
+  const rowsEl = document.getElementById("scheduleRows");
+  if (!rowsEl) return; // settingsHtml() wasn't rendered this pass
+  let draft = state.schedule.map(e => ({ ...e }));
+
+  function renderRows() {
+    rowsEl.innerHTML = draft.length
+      ? draft.map((e, i) => scheduleRowHtml(e, i)).join("")
+      : `<div class="note">No classes yet. Add one below.</div>`;
+    wireRows();
+  }
+  function wireRows() {
+    draft.forEach((e, i) => {
+      rowsEl.querySelector(`[data-sched-day="${i}"]`)?.addEventListener("change", ev => draft[i].day = ev.target.value);
+      rowsEl.querySelector(`[data-sched-start="${i}"]`)?.addEventListener("change", ev => draft[i].start = ev.target.value);
+      rowsEl.querySelector(`[data-sched-end="${i}"]`)?.addEventListener("change", ev => draft[i].end = ev.target.value);
+      rowsEl.querySelector(`[data-sched-building="${i}"]`)?.addEventListener("change", ev => draft[i].building = ev.target.value);
+      rowsEl.querySelector(`[data-sched-course="${i}"]`)?.addEventListener("input", ev => draft[i].course = ev.target.value);
+      rowsEl.querySelector(`[data-sched-del="${i}"]`)?.addEventListener("click", () => { draft.splice(i, 1); renderRows(); });
+    });
+  }
+  wireRows();
+
+  document.querySelector("[data-sched-add]")?.addEventListener("click", () => {
+    draft.push({ day: "Mon", start: "09:00", end: "10:00", building: buildings[0]?.id || "", course: "" });
+    renderRows();
+  });
+
+  document.querySelector("[data-sched-save]")?.addEventListener("click", () => {
+    const cleaned = draft.filter(isValidScheduleEntry).map(e => ({
+      day: e.day, start: e.start, end: e.end, building: e.building, course: (e.course || "").toString(),
+    }));
+    saveSchedule(cleaned);
+    state.schedule = cleaned;
+    draft = cleaned.map(e => ({ ...e }));
+
+    const ctx = currentTripContext(clockNow());
+    state.today = ctx.today;
+    state.entry = ctx.entry;
+    state.mode = ctx.mode;
+
+    if (viewMode === "route") {
+      refresh();
+    } else {
+      renderBrowseSheet();
+    }
+  });
 }
 
 function wireSheetControls() {
@@ -1509,13 +1776,24 @@ function wireSheetControls() {
       refresh();
     })
   );
-  document.querySelectorAll(".chip").forEach(chip =>
+  // [data-idx] excludes the back/refresh chips above, which share the same
+  // .chip class for visual consistency but aren't class pickers.
+  document.querySelectorAll(".chip[data-idx]").forEach(chip =>
     chip.addEventListener("click", () => {
-      const list = state.today.length ? state.today : schedule;
+      const list = state.today.length ? state.today : state.schedule;
       state.entry = list[Number(chip.dataset.idx)];
       refresh();
     })
   );
+  document.querySelector("[data-back-browse]")?.addEventListener("click", backToBrowse);
+  document.querySelector("[data-refresh-route]")?.addEventListener("click", async e => {
+    if (!currentResult) return;
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    await refreshBusLeg(currentResult);
+    btn.disabled = false;
+  });
+  wireSettingsControls();
 }
 
 // Live countdowns go stale within a minute, so re-poll the chosen route and
@@ -1528,29 +1806,47 @@ function stopArrivalTicker() {
   if (arrivalTimer) { clearInterval(arrivalTimer); arrivalTimer = null; }
 }
 
+// Re-warms the itinerary's bus route, recomputes its wait AND the live
+// distance from the boarding stop, redraws that bus's map markers, and
+// patches the three DOM nodes in place — the single code path shared by the
+// 30s auto-ticker below and the route view's manual refresh button, so both
+// stay consistent by construction rather than by copy-pasted logic. Never a
+// re-render: renderSheet() replaces the whole sheet, which would close an
+// open Settings panel, drop focus mid-typing and invalidate the drag snap
+// points. Returns false when there's no bus leg to refresh (walk-only trip).
+async function refreshBusLeg(result) {
+  const leg = result?.legs.find(l => l.type === "bus");
+  if (!leg) return false;
+  await warmPredictions([leg.route]);
+  drawVehicleMarkers(leg.route);
+  const choice = patternFor(leg.route, leg.from, leg.to);
+  const pattern = choice?.pattern;
+  const cached = predictionCache.get(leg.route);
+  const arrival = nextArrival(leg.from, leg.route, pattern, clockNow(), true);
+  if (isFinite(arrival.minutes)) {
+    Object.assign(leg, { wait: arrival.minutes, live: arrival.live, derived: arrival.derived, reason: arrival.reason });
+  }
+  leg.distanceKm = pattern ? nearestVehicleDistanceKm(cached, leg.from, pattern) : null;
+  result.total = result.legs.reduce((t, l) => t + l.minutes + (l.wait || 0), 0);
+  const sub = document.querySelector("[data-bus-sub]");
+  const time = document.querySelector("[data-bus-time]");
+  const total = document.querySelector("[data-total]");
+  if (sub) sub.textContent = waitText(leg);
+  if (time) time.textContent = fmtMin(leg.wait + leg.minutes);
+  if (total) total.textContent = fmtMin(result.total);
+  return true;
+}
+
 function startArrivalTicker(result) {
   stopArrivalTicker();
-  const leg = result.legs.find(l => l.type === "bus");
   // Run for a scheduled leg too, not just a live one: a stop with nothing
   // currently inbound can start reporting a real bus on its own, and this is
   // what lets that leg upgrade from "~N min (scheduled)" to a real countdown
   // without the user having to manually refresh.
-  if (!leg) return;
-  arrivalTimer = setInterval(async () => {
+  if (!result.legs.find(l => l.type === "bus")) return;
+  arrivalTimer = setInterval(() => {
     if (document.hidden) return;
-    await warmPredictions([leg.route]);
-    drawVehicleMarkers(leg.route);
-    const choice = patternFor(leg.route, leg.from, leg.to);
-    const arrival = nextArrival(leg.from, leg.route, choice?.pattern, clockNow(), true);
-    if (!isFinite(arrival.minutes)) return;
-    Object.assign(leg, { wait: arrival.minutes, live: arrival.live, derived: arrival.derived, reason: arrival.reason });
-    result.total = result.legs.reduce((t, l) => t + l.minutes + (l.wait || 0), 0);
-    const sub = document.querySelector("[data-bus-sub]");
-    const time = document.querySelector("[data-bus-time]");
-    const total = document.querySelector("[data-total]");
-    if (sub) sub.textContent = waitText(leg);
-    if (time) time.textContent = fmtMin(leg.wait + leg.minutes);
-    if (total) total.textContent = fmtMin(result.total);
+    refreshBusLeg(result);
   }, PREDICTION_TTL_MS + 5000);
 }
 
@@ -1576,14 +1872,16 @@ const fileProtocolNoteHtml = () => isFileProtocol() ? `<div class="note">${fileP
 async function refresh() {
   stopArrivalTicker();
   clearVehicleMarkers();
+  currentResult = null;
   const content = document.getElementById("sheetContent");
   if (!state.entry) {
-    content.innerHTML = `<div class="sheet-title">No class today</div>
+    content.innerHTML = `${topRowHtml(false)}
+      <div class="sheet-title">No class today</div>
       <div class="sheet-sub">Pick a class to route to it.</div>${chipsHtml()}${fileProtocolNoteHtml()}${settingsHtml()}`;
     wireSheetControls();
     return;
   }
-  content.innerHTML = `<div class="loading">Finding your best route…</div>`;
+  content.innerHTML = `${topRowHtml(false)}<div class="loading">Finding your best route…</div>`;
   try {
     usedEstimateFallback = false;
     estimateReason = "";
@@ -1595,21 +1893,143 @@ async function refresh() {
       "Routing took too long to respond."
     );
     if (!result) {
-      content.innerHTML = `<div class="sheet-title">No route found</div>
+      content.innerHTML = `${topRowHtml(false)}
+        <div class="sheet-title">No route found</div>
         <div class="sheet-sub">Nothing fit within the walk-time cap.</div>${chipsHtml()}${fileProtocolNoteHtml()}${settingsHtml()}`;
       wireSheetControls();
       return;
     }
+    currentResult = result;
     renderSheet(result);
     drawRouteOnMap(result, state.location);
-    const busLeg = result.legs.find(l => l.type === "bus");
-    drawVehicleMarkers(busLeg ? busLeg.route : null);
+    await refreshBusLeg(result); // warms + patches the wait/distance the moment the sheet exists
     startArrivalTicker(result);
   } catch (err) {
-    content.innerHTML = `<div class="sheet-title">Couldn't find a route</div>
+    content.innerHTML = `${topRowHtml(false)}
+      <div class="sheet-title">Couldn't find a route</div>
       <div class="sheet-sub">${err.message}</div>${chipsHtml()}${fileProtocolNoteHtml()}${settingsHtml()}`;
     wireSheetControls();
   }
+}
+
+// =========================================================================
+// 7b. BROWSE VIEW — landing screen: every enabled route's shape + live buses
+// =========================================================================
+
+function routeCountText(code) {
+  const cached = predictionCache.get(code);
+  if (!cached) return "checking…";
+  if (cached.status !== "ok") return "live data unavailable";
+  const n = (cached.vehicles || []).length;
+  return n === 0 ? "no buses running now" : `${n} bus${n === 1 ? "" : "es"}`;
+}
+
+function routeRowHtml(r) {
+  const color = routeColor(r.code) || "#8e8e93";
+  const checked = enabledRoutes.has(r.code);
+  return `
+    <label class="step" data-route-row="${r.code}">
+      <input type="checkbox" data-route-toggle="${r.code}" ${checked ? "checked" : ""}
+        style="width:22px;height:22px;flex:none;accent-color:${color};">
+      <span style="width:12px;height:12px;border-radius:50%;background:${color};flex:none;" aria-hidden="true"></span>
+      <div class="body">
+        <div class="title">${r.code} · ${r.name} — <span data-route-count="${r.code}">${routeCountText(r.code)}</span></div>
+      </div>
+    </label>`;
+}
+
+function renderBrowseSheet() {
+  document.getElementById("sheetContent").innerHTML = `
+    <div class="sheet-title">Live Buses</div>
+    <div class="sheet-sub">Toggle routes to show or hide them on the map.</div>
+
+    <button type="button" class="btn-primary" data-generate-route>Generate route</button>
+
+    <div class="steps">${routes.map(routeRowHtml).join("")}</div>
+
+    ${isFileProtocol() ? `<div class="note">${fileProtocolNote()}</div>` : ""}
+    ${mapUnavailable ? `<div class="note">${mapNote()}</div>` : ""}
+    ${state.location.estimated ? `<div class="note">Using campus center — location wasn't available yet. Grant location access for a route from where you are.</div>` : ""}
+
+    ${settingsHtml()}
+  `;
+  wireBrowseControls();
+}
+
+function wireBrowseControls() {
+  document.querySelectorAll("[data-route-toggle]").forEach(cb =>
+    cb.addEventListener("change", () => {
+      const code = cb.dataset.routeToggle;
+      if (cb.checked) enabledRoutes.add(code); else enabledRoutes.delete(code);
+      saveEnabledRoutes(enabledRoutes);
+      drawBrowseRoutes();
+      drawBrowseVehicles();
+    })
+  );
+  document.querySelector("[data-generate-route]")?.addEventListener("click", generateRoute);
+  wireSettingsControls();
+}
+
+function patchRouteCounts() {
+  document.querySelectorAll("[data-route-count]").forEach(el => {
+    el.textContent = routeCountText(el.dataset.routeCount);
+  });
+}
+
+// Paints immediately from whatever's already known (baked-in route shapes
+// need no network at all; vehicles use whatever warmPredictions() last
+// cached), then warms live predictions in the background and patches once
+// they land — first paint is never gated on the network or on geolocation.
+function renderBrowseView() {
+  renderBrowseSheet();
+  drawBrowseRoutes();
+  drawBrowseVehicles();
+  warmPredictions([...enabledRoutes]).then(() => {
+    if (viewMode !== "browse") return; // navigated away while the fetch was in flight
+    drawBrowseVehicles();
+    patchRouteCounts();
+  }).catch(err => console.error("warmPredictions (browse) failed:", err));
+}
+
+let browseTimer = null;
+function stopBrowseTicker() {
+  if (browseTimer) { clearInterval(browseTimer); browseTimer = null; }
+}
+function startBrowseTicker() {
+  stopBrowseTicker();
+  browseTimer = setInterval(async () => {
+    if (document.hidden || viewMode !== "browse") return;
+    await warmPredictions([...enabledRoutes]);
+    if (viewMode !== "browse") return;
+    drawBrowseVehicles();
+    patchRouteCounts();
+  }, PREDICTION_TTL_MS + 5000);
+}
+
+// Pressing "Generate route" hands the map and sheet over to the route view;
+// clearing here (rather than relying on drawRouteOnMap()'s own
+// clearMapLayers()) guarantees browse's polylines are gone even if planning
+// then fails and only an error screen renders.
+async function generateRoute() {
+  viewMode = "route";
+  stopBrowseTicker();
+  clearMapLayers();
+  clearVehicleMarkers();
+  const ctx = currentTripContext(clockNow());
+  state.mode = ctx.mode;
+  state.today = ctx.today;
+  state.entry = ctx.entry;
+  await refresh();
+}
+
+function backToBrowse() {
+  viewMode = "browse";
+  stopArrivalTicker();
+  currentResult = null;
+  clearMapLayers();
+  clearVehicleMarkers();
+  renderBrowseView();
+  startBrowseTicker();
 }
 
 // ---- Draggable sheet with peek / half / full snap points ----
@@ -1677,30 +2097,41 @@ async function init() {
   // still land on an honest, usable sheet instead of leaving that up forever.
   try {
     state.permit = permits.find(p => p.code === "CXC");
+    state.schedule = loadSchedule();
+    enabledRoutes = loadEnabledRoutes();
     setupSheet();
     initMap();
     computeSnaps();
     setSheetY(snaps.half, false);
-
-    state.location = await getUserLocation();
-    setUserMarker(state.location);
-    if (map) {
-      map.setView([state.location.lat, state.location.lng], 15);
-      map.invalidateSize();
-    }
 
     const ctx = currentTripContext(clockNow());
     state.mode = ctx.mode;
     state.today = ctx.today;
     state.entry = ctx.entry;
 
-    await refresh();
+    // The map must paint immediately at the campus default centre — first
+    // paint is never gated on geolocation. Location resolves in the
+    // background and only recentres the view / updates the "estimated"
+    // note when (if) it arrives; denial still leaves a fully working browse
+    // view, per the never-stall rule the rest of the app already follows.
+    viewMode = "browse";
+    renderBrowseView();
+    startBrowseTicker();
+
+    getUserLocation().then(loc => {
+      state.location = loc;
+      setUserMarker(loc);
+      if (map) {
+        map.setView([loc.lat, loc.lng], 15);
+        map.invalidateSize();
+      }
+    }).catch(err => console.error("getUserLocation() failed:", err));
   } catch (err) {
     console.error("init() failed:", err);
     const content = document.getElementById("sheetContent");
     content.innerHTML = `<div class="sheet-title">Couldn't start</div>
-      <div class="sheet-sub">${err.message}</div>${chipsHtml()}${fileProtocolNoteHtml()}${settingsHtml()}`;
-    wireSheetControls();
+      <div class="sheet-sub">${err.message}</div>${fileProtocolNoteHtml()}${settingsHtml()}`;
+    wireSettingsControls();
   }
 }
 
